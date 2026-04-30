@@ -1,44 +1,59 @@
 name: Katabump Auto Renew
 
 on:
+  # 定时任务配置
   schedule:
-    # 每天 UTC 0点 (北京时间 8点) 运行
+    # 每天 UTC 时间 00:00 (即北京时间早上 08:00) 自动执行
     - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动触发
+  # 允许在 GitHub Actions 页面上手动点击运行
+  workflow_dispatch:
 
 jobs:
   renew:
+    # 指定运行的系统环境
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb
-        npm install
-        npx playwright install-deps chrome
-      
-    - name: Run Renew Script
-      env:
-        # 将 USERS_JSON 配置在 GitHub Repository Secrets 中
-        # 格式: [{"username": "xxx", "password": "xxx"}, ...]
-        USERS_JSON: ${{ secrets.USERS_JSON }}
-        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      # 使用 xvfb-run 模拟有头环境运行
-      run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+      # 步骤 1: 拉取代码仓库
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Upload Screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshots
-        path: screenshots/
+      # 步骤 2: 配置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 步骤 3: 安装系统依赖与 Node 模块
+      - name: Install Dependencies
+        run: |
+          # 更新源并安装 xvfb (虚拟帧缓冲，用于在无显示器的服务器上模拟显示器)
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          
+          # 安装 package.json 中的依赖
+          npm install
+          
+          # 安装缺少的防检测插件库
+          npm install playwright-extra puppeteer-extra-plugin-stealth
+          
+          # 仅安装 Chromium 浏览器内核以节省时间和空间
+          npx playwright install chromium
+
+      # 步骤 4: 执行核心脚本
+      - name: Run Auto Renew Script
+        env:
+          # 将 GitHub Secrets 映射到系统环境变量中
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+        # 使用 xvfb-run 启动一个分辨率为 1280x720 的虚拟屏幕来运行脚本
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+      # 步骤 5: 上传截图归档 (无论成功或失败都会执行)
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-screenshots
+          path: screenshots/
+          retention-days: 7 # 截图保留 7 天
