@@ -1,625 +1,181 @@
+// 引入必要的依赖库
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
-const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
-const { spawn, exec } = require('child_process');
-const http = require('http');
 
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-const TG_CHAT_ID = process.env.TG_CHAT_ID;
-
-async function sendTelegramMessage(message, imagePath = null) {
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
-
-    // 1. 发送文字消息
-    try {
-        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        await axios.post(url, {
-            chat_id: TG_CHAT_ID,
-            text: message,
-            parse_mode: 'Markdown'
-        });
-        console.log('[Telegram] Message sent.');
-    } catch (e) {
-        console.error('[Telegram] Failed to send message:', e.message);
-    }
-
-    // 2. 发送图片 (如果有)
-    if (imagePath && fs.existsSync(imagePath)) {
-        console.log('[Telegram] Sending photo...');
-        // 使用 curl 发送图片，避免引入额外的 multipart 依赖
-        // 注意：Windows 本地测试可能需要环境支持 curl，GitHub Actions (Ubuntu) 默认支持
-        const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}"`;
-        await new Promise(resolve => {
-            exec(cmd, (err) => {
-                if (err) console.error('[Telegram] Failed to send photo via curl:', err.message);
-                else console.log('[Telegram] Photo sent.');
-                resolve();
-            });
-        });
-    }
-}
-
-// 启用 stealth 插件
+// 启用 stealth 插件，抹除 Playwright 的自动化特征，降低被风控拦截的概率
 chromium.use(stealth);
 
-// GitHub Actions 环境下的 Chrome 路径 (通常是 google-chrome)
-const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
-const DEBUG_PORT = 9222;
-
-// 确保 localhost 不走代理
-process.env.NO_PROXY = 'localhost,127.0.0.1';
-
-// --- Proxy Configuration ---
+// 从 GitHub Actions 环境变量中读取配置
+// USERS_JSON 格式应为: [{"username":"xxx","password":"xxx"}]
+const USERS_JSON = process.env.USERS_JSON;
 const HTTP_PROXY = process.env.HTTP_PROXY;
-let PROXY_CONFIG = null;
 
-if (HTTP_PROXY) {
-    try {
-        const proxyUrl = new URL(HTTP_PROXY);
-        PROXY_CONFIG = {
-            server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
-            username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
-            password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
-        };
-        console.log(`[代理] 检测到配置: 服务器=${PROXY_CONFIG.server}, 认证=${PROXY_CONFIG.username ? '是' : '否'}`);
-    } catch (e) {
-        console.error('[代理] TODO HTTP_PROXY 格式无效。期望格式: http://user:pass@host:port 或 http://host:port');
-        process.exit(1);
-    }
-}
-
-// --- INJECTED_SCRIPT ---
-const INJECTED_SCRIPT = `
+// --- 针对 ALTCHA 的注入脚本 ---
+// 该脚本会定期检查页面上的 <altcha-widget> 元素，并提取其位置和状态
+const ALTCHA_HOOK = `
 (function() {
-    if (window.self === window.top) return;
-
-    // 1. 模拟鼠标屏幕坐标
-    try {
-        function getRandomInt(min, max) {
-            return Math.floor(Math.random() * (max - min + 1)) + min;
+    setInterval(() => {
+        const altcha = document.querySelector('altcha-widget');
+        if (altcha) {
+            const rect = altcha.getBoundingClientRect();
+            // 将数据挂载到 window 对象，供外部 Playwright 读取
+            window.__altcha_data = {
+                x: rect.left + rect.width / 2, // 计算元素的中心点 X 坐标
+                y: rect.top + rect.height / 2,  // 计算元素的中心点 Y 坐标
+                state: altcha.getAttribute('state'), // 状态：'unverified', 'verifying', 'verified'
+                exists: true
+            };
         }
-        let screenX = getRandomInt(800, 1200);
-        let screenY = getRandomInt(400, 600);
-        
-        Object.defineProperty(MouseEvent.prototype, 'screenX', { value: screenX });
-        Object.defineProperty(MouseEvent.prototype, 'screenY', { value: screenY });
-    } catch (e) { }
-
-    // 2. 简单的 attachShadow Hook
-    try {
-        const originalAttachShadow = Element.prototype.attachShadow;
-        
-        Element.prototype.attachShadow = function(init) {
-            const shadowRoot = originalAttachShadow.call(this, init);
-            
-            if (shadowRoot) {
-                const checkAndReport = () => {
-                    const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
-                    if (checkbox) {
-                        const rect = checkbox.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
-                            const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
-                            const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
-                            window.__turnstile_data = { xRatio, yRatio };
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-
-                if (!checkAndReport()) {
-                    const observer = new MutationObserver(() => {
-                        if (checkAndReport()) observer.disconnect();
-                    });
-                    observer.observe(shadowRoot, { childList: true, subtree: true });
-                }
-            }
-            return shadowRoot;
-        };
-    } catch (e) {
-        console.error('[注入] Hook attachShadow 失败:', e);
-    }
+    }, 500); // 每 500 毫秒扫描一次
 })();
 `;
 
-// 辅助函数：检测代理是否可用
-async function checkProxy() {
-    if (!PROXY_CONFIG) return true;
+/**
+ * 处理 ALTCHA 验证的核心函数
+ * @param {object} page - Playwright 的 Page 对象
+ * @returns {boolean} - 返回当前是否已验证成功 (verified)
+ */
+async function handleAltcha(page) {
+    // 从浏览器上下文中获取注入脚本抛出的数据
+    const data = await page.evaluate(() => window.__altcha_data);
+    if (!data || !data.exists) return false;
 
-    console.log('[代理] 正在验证代理连接...');
-    try {
-        const axiosConfig = {
-            proxy: {
-                protocol: 'http',
-                host: new URL(PROXY_CONFIG.server).hostname,
-                port: new URL(PROXY_CONFIG.server).port,
-            },
-            timeout: 10000
-        };
-
-        if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
-            axiosConfig.proxy.auth = {
-                username: PROXY_CONFIG.username,
-                password: PROXY_CONFIG.password
-            };
-        }
-
-        await axios.get('https://www.google.com', axiosConfig);
-        console.log('[代理] 连接成功！');
-        return true;
-    } catch (error) {
-        console.error(`[代理] 连接失败: ${error.message}`);
-        return false;
-    }
-}
-
-function checkPort(port) {
-    return new Promise((resolve) => {
-        const req = http.get(`http://localhost:${port}/json/version`, (res) => {
-            resolve(true);
+    // 如果状态不是 'verified' (已验证) 也不是 'verifying' (正在计算)，则发起点击
+    if (data.state !== 'verified' && data.state !== 'verifying') {
+        console.log(`[ALTCHA] 当前状态: ${data.state}，准备发起物理点击...`);
+        // 使用 CDP (Chrome DevTools Protocol) 发送底层的系统级鼠标点击，比 page.click() 更逼真
+        const client = await page.context().newCDPSession(page);
+        
+        // 鼠标按下
+        await client.send('Input.dispatchMouseEvent', {
+            type: 'mousePressed', x: data.x, y: data.y, button: 'left', clickCount: 1
         });
-        req.on('error', () => resolve(false));
-        req.end();
-    });
+        
+        // 模拟人类按压停顿 100 毫秒
+        await new Promise(r => setTimeout(r, 100));
+        
+        // 鼠标抬起
+        await client.send('Input.dispatchMouseEvent', {
+            type: 'mouseReleased', x: data.x, y: data.y, button: 'left', clickCount: 1
+        });
+        
+        await client.detach();
+    }
+    
+    return data.state === 'verified';
 }
 
-async function launchChrome() {
-    console.log('检查 Chrome 是否已在端口 ' + DEBUG_PORT + ' 上运行...');
-    if (await checkPort(DEBUG_PORT)) {
-        console.log('Chrome 已开启。');
-        return;
-    }
-
-    console.log(`正在启动 Chrome (路径: ${CHROME_PATH})...`);
-
-    const args = [
-        `--remote-debugging-port=${DEBUG_PORT}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        // '--headless=new', // (已被注释) 使用 xvfb-run 时不需要 headless 模式，这样可以模拟有头浏览器增加成功率
-        '--disable-gpu',
-        '--window-size=1280,720',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--user-data-dir=/tmp/chrome_user_data' // 必须指定用户数据目录，否则远程调试可能失败
-    ];
-
-    if (PROXY_CONFIG) {
-        args.push(`--proxy-server=${PROXY_CONFIG.server}`);
-        args.push('--proxy-bypass-list=<-loopback>');
-    }
-    // 添加针对 Linux 环境的额外稳定性参数
-    args.push('--disable-dev-shm-usage'); // 避免共享内存不足
-
-
-    const chrome = spawn(CHROME_PATH, args, {
-        detached: true,
-        stdio: 'ignore'
-    });
-    chrome.unref();
-
-    console.log('正在等待 Chrome 初始化...');
-    for (let i = 0; i < 20; i++) {
-        if (await checkPort(DEBUG_PORT)) break;
-        await new Promise(r => setTimeout(r, 1000));
-    }
-
-    if (!await checkPort(DEBUG_PORT)) {
-        console.error('Chrome 无法在端口 ' + DEBUG_PORT + ' 上启动');
-        throw new Error('Chrome 启动失败');
-    }
-}
-
-function getUsers() {
-    // 从环境变量读取 JSON 字符串
-    // GitHub Actions Secret: USERS_JSON = [{"username":..., "password":...}]
-    try {
-        if (process.env.USERS_JSON) {
-            const parsed = JSON.parse(process.env.USERS_JSON);
-            return Array.isArray(parsed) ? parsed : (parsed.users || []);
-        }
-    } catch (e) {
-        console.error('解析 USERS_JSON 环境变量错误:', e);
-    }
-    return [];
-}
-
-async function attemptTurnstileCdp(page) {
-    const frames = page.frames();
-    for (const frame of frames) {
-        try {
-            const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
-
-            if (data) {
-                console.log('>> 在 frame 中发现 Turnstile。比例:', data);
-
-                const iframeElement = await frame.frameElement();
-                if (!iframeElement) continue;
-
-                const box = await iframeElement.boundingBox();
-                if (!box) continue;
-
-                const clickX = box.x + (box.width * data.xRatio);
-                const clickY = box.y + (box.height * data.yRatio);
-
-                console.log(`>> 计算点击坐标: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
-
-                const client = await page.context().newCDPSession(page);
-
-                await client.send('Input.dispatchMouseEvent', {
-                    type: 'mousePressed',
-                    x: clickX,
-                    y: clickY,
-                    button: 'left',
-                    clickCount: 1
-                });
-
-                await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
-
-                await client.send('Input.dispatchMouseEvent', {
-                    type: 'mouseReleased',
-                    x: clickX,
-                    y: clickY,
-                    button: 'left',
-                    clickCount: 1
-                });
-
-                console.log('>> CDP 点击已发送。');
-                await client.detach();
-                return true;
-            }
-        } catch (e) { }
-    }
-    return false;
-}
-
+// 主执行函数 (立即执行的异步箭头函数)
 (async () => {
-    const users = getUsers();
-    if (users.length === 0) {
-        console.log('未在 process.env.USERS_JSON 中找到用户');
+    // 基础配置检查
+    if (!USERS_JSON) {
+        console.error("❌ 致命错误: 未找到 USERS_JSON 环境变量，请在 GitHub Secrets 中配置。");
         process.exit(1);
     }
 
-    if (PROXY_CONFIG) {
-        const isValid = await checkProxy();
-        if (!isValid) {
-            console.error('[代理] 代理无效，终止运行。');
-            process.exit(1);
-        }
-    }
+    const users = JSON.parse(USERS_JSON);
+    
+    console.log("正在启动 Chromium 浏览器...");
+    // 启动浏览器
+    // 注意：headless 必须为 false，配合 GitHub Actions 的 xvfb 虚拟屏幕使用，否则 ALTCHA 可能无法正常渲染
+    const browser = await chromium.launch({ 
+        headless: false, 
+        proxy: HTTP_PROXY ? { server: HTTP_PROXY } : undefined 
+    });
 
-    await launchChrome();
+    // 创建上下文并设置统一的视口大小
+    const context = await browser.newContext({
+        viewport: { width: 1280, height: 720 }
+    });
+    const page = await context.newPage();
+    
+    // 全局注入 ALTCHA 监控脚本
+    await page.addInitScript(ALTCHA_HOOK);
 
-    console.log(`正在连接 Chrome...`);
-    let browser;
-    for (let k = 0; k < 5; k++) {
+    // 遍历处理每个用户账号
+    for (const user of users) {
+        console.log(`\n=========================================`);
+        console.log(`开始处理用户账号: ${user.username}`);
+        console.log(`=========================================`);
+        
         try {
-            browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-            console.log('连接成功！');
-            break;
-        } catch (e) {
-            console.log(`连接尝试 ${k + 1} 失败。2秒后重试...`);
-            await new Promise(r => setTimeout(r, 2000));
-        }
-    }
+            // 1. 访问登录页面并等待网络空闲
+            console.log("正在访问登录页面...");
+            await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'networkidle' });
+            
+            // 2. 填写账号密码
+            console.log("填写账号密码信息...");
+            await page.getByRole('textbox', { name: 'Email' }).fill(user.username);
+            await page.getByRole('textbox', { name: 'Password' }).fill(user.password);
+            
+            // 3. 处理登录页面的 ALTCHA 验证码
+            console.log("检测登录页验证码...");
+            await new Promise(r => setTimeout(r, 2000)); // 预留时间让页面完全加载
+            await handleAltcha(page);
+            
+            // 点击登录按钮
+            await page.getByRole('button', { name: 'Login' }).click();
 
-    if (!browser) {
-        console.error('连接失败。退出。');
-        process.exit(1);
-    }
+            // 4. 等待跳转到仪表盘
+            console.log("等待进入 Dashboard...");
+            await page.waitForURL('**/dashboard', { timeout: 15000 });
+            
+            // 5. 点击首个服务器的 "See" 按钮进入详情页
+            console.log("进入服务器详情页...");
+            await page.getByRole('link', { name: 'See' }).first().click();
 
-    const context = browser.contexts()[0];
-    let page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
-    page.setDefaultTimeout(60000);
+            // 6. 查找并点击第一层的 "Renew" 按钮
+            console.log("查找续期按钮...");
+            const renewBtn = page.getByRole('button', { name: 'Renew' }).first();
+            await renewBtn.waitFor({ state: 'visible' });
+            await renewBtn.click();
 
-    if (PROXY_CONFIG && PROXY_CONFIG.username) {
-        console.log('[代理] 正在设置认证...');
-        await context.setHTTPCredentials({
-            username: PROXY_CONFIG.username,
-            password: PROXY_CONFIG.password
-        });
-    } else {
-        await context.setHTTPCredentials(null);
-    }
-
-    await page.addInitScript(INJECTED_SCRIPT);
-    console.log('注入脚本已添加。');
-
-    for (let i = 0; i < users.length; i++) {
-        const user = users[i];
-        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
-
-        try {
-            if (page.isClosed()) {
-                page = await context.newPage();
-                // Context credentials apply
-                await page.addInitScript(INJECTED_SCRIPT);
-            }
-
-            // --- 登录逻辑 (简略版，逻辑一致) ---
-            if (page.url().includes('dashboard')) {
-                await page.goto('https://dashboard.katabump.com/auth/logout');
-                await page.waitForTimeout(2000);
-            }
-            // 总是先去登录页
-            await page.goto('https://dashboard.katabump.com/auth/login');
-            await page.waitForTimeout(2000);
-            if (page.url().includes('dashboard')) {
-                // 如果登出没成功，再次登出
-                await page.goto('https://dashboard.katabump.com/auth/logout');
-                await page.waitForTimeout(2000);
-                await page.goto('https://dashboard.katabump.com/auth/login');
-            }
-
-            console.log('正在输入凭据...');
-            try {
-                const emailInput = page.getByRole('textbox', { name: 'Email' });
-                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
-                await emailInput.fill(user.username);
-                const pwdInput = page.getByRole('textbox', { name: 'Password' });
-                await pwdInput.fill(user.password);
-                await page.waitForTimeout(500);
-
-                // --- Cloudflare Turnstile Bypass for Login ---
-                console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
-                let cdpClickResult = false;
-                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
-                    cdpClickResult = await attemptTurnstileCdp(page);
-                    if (cdpClickResult) break;
-                    await page.waitForTimeout(1000);
-                }
-
-                if (cdpClickResult) {
-                    console.log('   >> 登录 CDP 点击生效。正在等待最多 10秒 Cloudflare 成功标志...');
-                    for (let waitSec = 0; waitSec < 10; waitSec++) {
-                        const frames = page.frames();
-                        let isSuccess = false;
-                        for (const f of frames) {
-                            if (f.url().includes('cloudflare')) {
-                                try {
-                                    if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                        isSuccess = true;
-                                        break;
-                                    }
-                                } catch (e) { }
-                            }
-                        }
-                        if (isSuccess) {
-                            console.log('   >> 登录前 Turnstile 验证成功。');
-                            break;
-                        }
-                        await page.waitForTimeout(1000);
-                    }
-                } else {
-                    console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
-                }
-                // --------------------------------------------
-
-                await page.getByRole('button', { name: 'Login', exact: true }).click();
-
-                // User Request: Check for incorrect password
-                try {
-                    const errorMsg = page.getByText('Incorrect password or no account');
-                    if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-                        const failShotPath = path.join(photoDir, `${safeUsername}.png`);
-                        try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-
-                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
-
-                        continue;
-                    }
-                } catch (e) { }
-
-            } catch (e) {
-                console.log('登录错误:', e.message);
-            }
-
-            console.log('正在寻找 "See" 链接...');
-            try {
-                await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
-                await page.waitForTimeout(1000);
-                await page.getByRole('link', { name: 'See' }).first().click();
-            } catch (e) {
-                console.log('未找到 "See" 按钮。');
-                continue;
-            }
-
-            // --- Renew 逻辑 ---
-            let renewSuccess = false;
-            // 2. 一个扁平化的主循环：尝试 Renew 整个流程 (最多 20 次)
-            for (let attempt = 1; attempt <= 20; attempt++) {
-                let hasCaptchaError = false;
-
-                // 1. 如果是重试 (attempt > 1)，说明之前失败了或者刚刷新完页面
-                // 我们直接开始寻找 Renew 按钮
-                console.log(`\n[尝试 ${attempt}/20] 正在寻找 Renew 按钮...`);
-
-                const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
-                try {
-                    // 稍微等待一下，防止页面刚刷新还没渲染出来
-                    await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
-                } catch (e) { }
-
-                if (await renewBtn.isVisible()) {
-                    await renewBtn.click();
-                    console.log('Renew 按钮已点击。等待模态框...');
-
-                    const modal = page.locator('#renew-modal');
-                    try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) {
-                        console.log('模态框未出现？重试中...');
-                        continue;
-                    }
-
-                    // A. 在模态框里晃晃鼠标
-                    try {
-                        const box = await modal.boundingBox();
-                        if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
-                    } catch (e) { }
-
-                    // B. 找 Turnstile (小重试)
-                    console.log('正在检查 Turnstile (使用 CDP 绕过)...');
-                    let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
-                        cdpClickResult = await attemptTurnstileCdp(page);
-                        if (cdpClickResult) break;
-                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/30] 尚未找到 Turnstile 复选框...`);
-                        await page.waitForTimeout(1000);
-                    }
-
-                    let isTurnstileSuccess = false;
-                    if (cdpClickResult) {
-                        console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
-                        await page.waitForTimeout(8000);
-                    } else {
-                        console.log('   >> 重试后仍未确认 Turnstile 复选框。');
-                    }
-
-                    // C. 检查 Success 标志
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
-                            try {
-                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                    console.log('   >> 在 Turnstile iframe 中检测到 "Success!"。');
-                                    isTurnstileSuccess = true;
-                                    break;
-                                }
-                            } catch (e) { }
-                        }
-                    }
-
-                    // D. 准备点击确认
-                    const confirmBtn = modal.getByRole('button', { name: 'Renew' });
-                    if (await confirmBtn.isVisible()) {
-
-                        // User Requested: Screenshot BEFORE final click
-                        const fs = require('fs');
-                        const path = require('path');
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                        const tsScreenshotName = `${safeUser}_Turnstile_${attempt}.png`;
-                        try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
-                            console.log(`   >> 📸 快照已保存: ${tsScreenshotName}`);
-                        } catch (e) { }
-
-                        // User Request: 找不到的话这个循环直接下一步点击renew，然后检测有没有Please complete the captcha to continue
-                        console.log('   >> 点击 Renew 确认按钮 (无论 Turnstile 状态如何)...');
-                        await confirmBtn.click();
-
-                        try {
-                            // 1. Check for Errors (Captcha or Date limit)
-                            const startVerifyTime = Date.now();
-                            while (Date.now() - startVerifyTime < 3000) {
-                                // A. Captcha Error
-                                if (await page.getByText('Please complete the captcha to continue').isVisible()) {
-                                    console.log('   >> ⚠️ 检测到错误: "Please complete the captcha".');
-                                    hasCaptchaError = true;
-                                    break;
-                                }
-
-                                // B. Not Renew Time Error
-                                const notTimeLoc = page.getByText("You can't renew your server yet");
-                                if (await notTimeLoc.isVisible()) {
-                                    const text = await notTimeLoc.innerText();
-                                    const match = text.match(/as of\s+(.*?)\s+\(/);
-                                    let dateStr = match ? match[1] : 'Unknown Date';
-                                    console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
-
-                                    // 截图证明
-                                    const fs = require('fs');
-                                    const path = require('path');
-                                    const photoDir = path.join(process.cwd(), 'screenshots');
-                                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                                    const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                                    const skipShotPath = path.join(photoDir, `${safeUser}_skip.png`);
-                                    try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
-
-                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
-
-                                    renewSuccess = true; // Mark as done to stop retries
-                                    try {
-                                        const closeBtn = modal.getByLabel('Close');
-                                        if (await closeBtn.isVisible()) await closeBtn.click();
-                                    } catch (e) { }
-                                    break;
-                                }
-                                await page.waitForTimeout(200);
-                            }
-                        } catch (e) { }
-
-                        if (renewSuccess) break; // Break loop if not time yet
-
-                        if (hasCaptchaError) {
-                            console.log('   >> Error found. Refreshing page to reset Turnstile...');
-                            await page.reload();
-                            await page.waitForTimeout(3000);
-                            continue; // 刷新后，重新开始大循环
-                        }
-
-                        // F. 检查成功 (模态框消失)
-                        await page.waitForTimeout(2000);
-                        if (!await modal.isVisible()) {
-                            console.log('   >> ✅ Modal closed. Renew successful!');
-
-                            // 截图成功状态
-                            const fs = require('fs');
-                            const path = require('path');
-                            const photoDir = path.join(process.cwd(), 'screenshots');
-                            if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                            const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                            const successShotPath = path.join(photoDir, `${safeUser}_success.png`);
-                            try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
-
-                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
-                            renewSuccess = true;
-                            break;
-                        } else {
-                            console.log('   >> 模态框仍打开但无错误？重试循环...');
-                            await page.reload();
-                            await page.waitForTimeout(3000);
-                            continue;
-                        }
-                    } else {
-                        console.log('   >> 未找到模态框内的验证按钮？刷新中...');
-                        await page.reload();
-                        await page.waitForTimeout(3000);
-                        continue;
-                    }
-
-                } else {
-                    console.log('未找到 Renew 按钮 (服务器可能已续期或页面加载错误)。');
+            // 7. 处理弹出的续期确认模态框
+            console.log("等待续期确认模态框...");
+            await page.locator('#renew-modal').waitFor({ state: 'visible' });
+            
+            // 8. 循环等待 ALTCHA 的 PoW (工作量证明) 计算完成
+            // ALTCHA 需要消耗 CPU 算力，通常需要几秒钟，最大重试 30 次 (约 30 秒)
+            console.log("等待 ALTCHA PoW 算力验证完成...");
+            let isVerified = false;
+            for (let i = 0; i < 30; i++) {
+                // 每次循环尝试触发或检查状态
+                await handleAltcha(page);
+                isVerified = await page.evaluate(() => window.__altcha_data?.state === 'verified');
+                
+                if (isVerified) {
+                    console.log(`[ALTCHA] 第 ${i + 1} 次检查：验证成功！`);
                     break;
                 }
+                await page.waitForTimeout(1000); // 每次循环间隔 1 秒
             }
+
+            // 9. 验证通过后，点击最终的确认续期按钮
+            if (isVerified) {
+                // 保存截图供 GitHub Actions Artifacts 查阅
+                if (!fs.existsSync('screenshots')) fs.mkdirSync('screenshots');
+                await page.screenshot({ path: `screenshots/${user.username}_verified.png` });
+                
+                console.log("正在提交最终续期请求...");
+                await page.locator('#renew-modal').getByRole('button', { name: 'Renew' }).click();
+                
+                // 等待一下让请求发出去
+                await new Promise(r => setTimeout(r, 3000));
+                console.log(`✅ [${user.username}] 续期指令执行完毕。`);
+            } else {
+                console.log(`❌ [${user.username}] ALTCHA 验证超时，未能执行续期。`);
+            }
+
         } catch (err) {
-            console.error(`Error processing user:`, err);
+            console.error(`❌ [${user.username}] 运行过程中发生错误: ${err.message}`);
         }
-
-        // Snapshot before handling next user
-        // In GitHub Actions, we save to 'screenshots' dir
-        const fs = require('fs');
-        const path = require('path');
-        const photoDir = path.join(process.cwd(), 'screenshots');
-        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-        // Use safe filename
-        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-        const screenshotPath = path.join(photoDir, `${safeUsername}.png`);
-        try {
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`截图已保存至: ${screenshotPath}`);
-        } catch (e) {
-            console.log('截图失败:', e.message);
-        }
-
-        console.log(`用户处理完成\n`);
+        
+        // 每次处理完一个账号，清空当前上下文的 Cookie，防止串号
+        console.log("清理会话缓存，准备下一个账号...");
+        await context.clearCookies();
     }
 
-    console.log('完成。');
+    console.log("\n所有账号处理完毕，关闭浏览器。");
     await browser.close();
-    process.exit(0);
 })();
