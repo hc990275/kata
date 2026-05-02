@@ -8,7 +8,6 @@ const http = require('http');
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
-const TG_THREAD_ID = process.env.TG_THREAD_ID; // 话题 ID
 
 async function sendTelegramMessage(message, imagePath = null) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
@@ -16,14 +15,11 @@ async function sendTelegramMessage(message, imagePath = null) {
     // 1. 发送文字消息
     try {
         const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        const payload = {
+        await axios.post(url, {
             chat_id: TG_CHAT_ID,
             text: message,
             parse_mode: 'Markdown'
-        };
-        if (TG_THREAD_ID) payload.message_thread_id = TG_THREAD_ID;
-
-        await axios.post(url, payload);
+        });
         console.log('[Telegram] Message sent.');
     } catch (e) {
         console.error('[Telegram] Failed to send message:', e.message);
@@ -33,10 +29,8 @@ async function sendTelegramMessage(message, imagePath = null) {
     if (imagePath && fs.existsSync(imagePath)) {
         console.log('[Telegram] Sending photo...');
         // 使用 curl 发送图片，避免引入额外的 multipart 依赖
-        let cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}"`;
-        if (TG_THREAD_ID) cmd += ` -F message_thread_id="${TG_THREAD_ID}"`;
-        cmd += ` -F photo="@${imagePath}"`;
-
+        // 注意：Windows 本地测试可能需要环境支持 curl，GitHub Actions (Ubuntu) 默认支持
+        const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}"`;
         await new Promise(resolve => {
             exec(cmd, (err) => {
                 if (err) console.error('[Telegram] Failed to send photo via curl:', err.message);
@@ -288,12 +282,6 @@ async function attemptTurnstileCdp(page) {
         process.exit(1);
     }
 
-    const results = {
-        success: [],
-        failed: [],
-        total: users.length
-    };
-
     if (PROXY_CONFIG) {
         const isValid = await checkProxy();
         if (!isValid) {
@@ -420,7 +408,7 @@ async function attemptTurnstileCdp(page) {
                         try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
 
                         await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
-                        results.failed.push(user.username);
+
                         continue;
                     }
                 } catch (e) { }
@@ -436,7 +424,6 @@ async function attemptTurnstileCdp(page) {
                 await page.getByRole('link', { name: 'See' }).first().click();
             } catch (e) {
                 console.log('未找到 "See" 按钮。');
-                results.failed.push(user.username);
                 continue;
             }
 
@@ -555,7 +542,6 @@ async function attemptTurnstileCdp(page) {
                                     await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
 
                                     renewSuccess = true; // Mark as done to stop retries
-                                    results.success.push(user.username); // 还没到时间也算处理成功
                                     try {
                                         const closeBtn = modal.getByLabel('Close');
                                         if (await closeBtn.isVisible()) await closeBtn.click();
@@ -591,7 +577,6 @@ async function attemptTurnstileCdp(page) {
 
                             await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
                             renewSuccess = true;
-                            results.success.push(user.username);
                             break;
                         } else {
                             console.log('   >> 模态框仍打开但无错误？重试循环...');
@@ -613,7 +598,6 @@ async function attemptTurnstileCdp(page) {
             }
         } catch (err) {
             console.error(`Error processing user:`, err);
-            results.failed.push(user.username);
         }
 
         // Snapshot before handling next user
@@ -634,17 +618,6 @@ async function attemptTurnstileCdp(page) {
 
         console.log(`用户处理完成\n`);
     }
-
-    // --- 发送总结报告 ---
-    const summaryMsg = `📊 *续期任务执行报告*
-━━━━━━━━━━━━━━━
-✅ 成功: ${results.success.length}
-❌ 失败: ${results.failed.length}
-🔢 总计: ${results.total}
-━━━━━━━━━━━━━━━
-${results.failed.length > 0 ? `⚠️ *失败账号列表:*\n${results.failed.join('\n')}` : '🎉 所有账号均已成功处理！'}`;
-
-    await sendTelegramMessage(summaryMsg);
 
     console.log('完成。');
     await browser.close();
