@@ -260,6 +260,7 @@ function getUsers() {
 
                 const username = String(entry.username || entry.email || '').trim();
                 const password = String(entry.password || '').trim();
+                const serverId = String(entry.serverId || '').trim();
 
                 if (!username || !password) {
                     console.log(`[用户配置] 跳过无效条目: username/password 不完整 (${maskUsernameForLog(username)})`);
@@ -273,7 +274,7 @@ function getUsers() {
                 }
 
                 seenUsernames.add(dedupeKey);
-                users.push({ username, password });
+                users.push({ username, password, serverId });
             }
 
             console.log(`[用户配置] USERS_JSON 原始条目 ${rawUsers.length}，有效用户 ${users.length}`);
@@ -771,14 +772,20 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
             }
 
             // 2. 登录后的操作
-            console.log('正在寻找 "See" 链接...');
-            try {
-                await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
-                await page.waitForTimeout(1000);
-                await page.getByRole('link', { name: 'See' }).first().click();
-            } catch (e) {
-                console.log('未找到 "See" 按钮 (可能登录未成功或界面变动)。');
-                continue;
+            if (user.serverId) {
+                console.log(`正在通过 Server ID (${user.serverId}) 直接访问续期页面...`);
+                await page.goto(`https://dashboard.katabump.com/servers/edit?id=${user.serverId}`);
+                await page.waitForTimeout(3000);
+            } else {
+                console.log('未配置 Server ID，正在寻找 "See" 链接...');
+                try {
+                    await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
+                    await page.waitForTimeout(1000);
+                    await page.getByRole('link', { name: 'See' }).first().click();
+                } catch (e) {
+                    console.log('未找到 "See" 按钮 (可能登录未成功或界面变动)。');
+                    continue;
+                }
             }
 
             // 3. Renew 逻辑
