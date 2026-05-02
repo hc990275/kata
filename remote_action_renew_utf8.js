@@ -1,4 +1,4 @@
-const { chromium } = require('playwright-extra');
+﻿const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 const axios = require('axios');
 const fs = require('fs');
@@ -8,15 +8,6 @@ const http = require('http');
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
-const TG_THREAD_ID = process.env.TG_THREAD_ID;
-
-let stats = {
-    total: 0,
-    success: 0,
-    failed: 0,
-    skipped: 0,
-    failedAccounts: []
-};
 
 // --- 辅助函数：转义 Telegram Markdown v1 特殊字符 ---
 function escapeMarkdown(text) {
@@ -31,7 +22,6 @@ async function sendTelegramMessage(message, imagePath = null) {
             const FormData = require('form-data');
             const form = new FormData();
             form.append('chat_id', TG_CHAT_ID);
-            if (TG_THREAD_ID) form.append('message_thread_id', TG_THREAD_ID);
             form.append('photo', fs.createReadStream(imagePath));
             form.append('caption', message);
             form.append('parse_mode', 'Markdown');
@@ -40,13 +30,11 @@ async function sendTelegramMessage(message, imagePath = null) {
             });
             console.log('[Telegram] Photo with caption sent.');
         } else {
-            const payload = {
+            await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
                 chat_id: TG_CHAT_ID,
                 text: message,
                 parse_mode: 'Markdown'
-            };
-            if (TG_THREAD_ID) payload.message_thread_id = TG_THREAD_ID;
-            await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, payload);
+            });
             console.log('[Telegram] Message sent.');
         }
     } catch (e) {
@@ -281,7 +269,6 @@ function getUsers() {
                 console.log(`[用户配置] 本次执行账号: ${users.map((user) => maskUsernameForLog(user.username)).join(', ')}`);
             }
 
-            stats.total = users.length;
             return users;
         }
     } catch (e) {
@@ -760,8 +747,6 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         const failScreenshot = path.join(failPhotoDir, `${failSafe}_login_fail.png`);
                         try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
                         await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n登录失败: 账号或密码错误`, failScreenshot);
-                        stats.failed++;
-                        stats.failedAccounts.push(user.username);
                         continue;
                     }
                 } catch (e) { }
@@ -861,7 +846,6 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                                     let dateStr = match ? match[1] : 'Unknown Date';
                                     console.log(`   >> ⏳ 暂无法续期 (还没到时间)。下次可续期: ${dateStr}`);
                                     renewSuccess = true;
-                                    stats.skipped++;
 
                                     const skipScreenshot = path.join(photoDir, `${safeUsername}_skip.png`);
                                     let modalClosed = false;
@@ -908,7 +892,6 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                             try { await saveViewportScreenshot(page, successScreenshot); } catch (e) {}
                             await sendTelegramMessage(`✅ *${escapeMarkdown(user.username)}*\n续期成功！`, successScreenshot);
                             renewSuccess = true;
-                            stats.success++;
                             break;
                         } else {
                             console.log('   >> 模态框未关闭，刷新重试...');
@@ -943,8 +926,6 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 const failScreenshot = path.join(failDir, `${failSafe}_renew_fail.png`);
                 try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
                 await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n${renewFailureReason}`, failScreenshot);
-                stats.failed++;
-                stats.failedAccounts.push(user.username);
             }
 
         } catch (err) {
@@ -961,23 +942,8 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
         console.log(`用户处理完成\n`);
     }
 
-    // --- 发送最终汇总报告 ---
-    let summaryMessage = `📊 *续期任务汇总报告*\n\n`;
-    summaryMessage += `🔹 总计账号: ${stats.total}\n`;
-    summaryMessage += `✅ 成功续期: ${stats.success}\n`;
-    summaryMessage += `⏳ 时间未到: ${stats.skipped}\n`;
-    summaryMessage += `❌ 失败数量: ${stats.failed}\n`;
-    
-    if (stats.failed > 0) {
-        summaryMessage += `\n⚠️ *失败账号清单*:\n`;
-        stats.failedAccounts.forEach(acc => {
-            summaryMessage += `- \`${acc}\`\n`;
-        });
-    }
-    
-    await sendTelegramMessage(summaryMessage);
-
     console.log('完成。');
     await browser.close();
     process.exit(0);
 })();
+
