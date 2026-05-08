@@ -18,6 +18,27 @@ let stats = {
     failedAccounts: []
 };
 
+const RENEW_DATES_FILE = path.join(process.cwd(), 'renew_dates.json');
+
+function loadRenewDates() {
+    if (fs.existsSync(RENEW_DATES_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(RENEW_DATES_FILE, 'utf8'));
+        } catch (e) {
+            console.error('解析 renew_dates.json 错误:', e);
+        }
+    }
+    return {};
+}
+
+function saveRenewDates(dates) {
+    try {
+        fs.writeFileSync(RENEW_DATES_FILE, JSON.stringify(dates, null, 2), 'utf8');
+    } catch (e) {
+        console.error('保存 renew_dates.json 错误:', e);
+    }
+}
+
 // --- 辅助函数：转义 Telegram Markdown v1 特殊字符 ---
 function escapeMarkdown(text) {
     return text.replace(/([_*`\[])/g, '\\$1');
@@ -660,6 +681,9 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
         process.exit(1);
     }
 
+    const renewDates = loadRenewDates();
+    let accountDatesInfo = {};
+
     if (PROXY_CONFIG) {
         if (!await checkProxy()) process.exit(1);
     }
@@ -708,6 +732,20 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
         console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`);
+        
+        const dedupeKey = user.username.toLowerCase();
+        let nextDateStr = renewDates[dedupeKey];
+        if (nextDateStr) {
+            let nextDate = new Date(nextDateStr);
+            if (!isNaN(nextDate.getTime())) {
+                if (Date.now() < nextDate.getTime()) {
+                    console.log(`[跳过] 账号 ${user.username} 还没到可续期时间，下次可续期: ${nextDateStr}`);
+                    stats.skipped++;
+                    accountDatesInfo[user.username] = nextDateStr;
+                    continue;
+                }
+            }
+        }
 
         try {
             if (page.isClosed()) {
@@ -763,6 +801,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n登录失败: 账号或密码错误`, failScreenshot);
                         stats.failed++;
                         stats.failedAccounts.push(user.username);
+                        accountDatesInfo[user.username] = "❌ 登录失败";
                         continue;
                     }
                 } catch (e) { }
@@ -870,6 +909,12 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                                     renewSuccess = true;
                                     stats.skipped++;
 
+                                    if (dateStr !== 'Unknown Date') {
+                                        renewDates[dedupeKey] = dateStr;
+                                        saveRenewDates(renewDates);
+                                    }
+                                    accountDatesInfo[user.username] = dateStr;
+
                                     const skipScreenshot = path.join(photoDir, `${safeUsername}_skip.png`);
                                     let modalClosed = false;
                                     try {
@@ -916,6 +961,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                             await sendTelegramMessage(`✅ *${escapeMarkdown(user.username)}*\n续期成功！`, successScreenshot);
                             renewSuccess = true;
                             stats.success++;
+                            
+                            delete renewDates[dedupeKey];
+                            saveRenewDates(renewDates);
+                            accountDatesInfo[user.username] = "✅ 刚刚成功";
+                            
                             break;
                         } else {
                             console.log('   >> 模态框未关闭，刷新重试...');
@@ -952,6 +1002,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n${renewFailureReason}`, failScreenshot);
                 stats.failed++;
                 stats.failedAccounts.push(user.username);
+                accountDatesInfo[user.username] = "❌ 失败/需重试";
             }
 
         } catch (err) {
@@ -973,12 +1024,18 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
     summaryMessage += `🔹 总计账号: ${stats.total}\n`;
     summaryMessage += `✅ 成功续期: ${stats.success}\n`;
     summaryMessage += `⏳ 时间未到: ${stats.skipped}\n`;
-    summaryMessage += `❌ 失败数量: ${stats.failed}\n`;
+    summaryMessage += `❌ 失败数量: ${stats.failed}\n\n`;
     
+    summaryMessage += `📅 *账号可签到日期详情*:\n`;
+    users.forEach(user => {
+        let statusStr = accountDatesInfo[user.username] || renewDates[user.username.toLowerCase()] || "今日/未知";
+        summaryMessage += `- \`${escapeMarkdown(user.username)}\`: ${escapeMarkdown(statusStr)}\n`;
+    });
+
     if (stats.failed > 0) {
         summaryMessage += `\n⚠️ *失败账号清单*:\n`;
         stats.failedAccounts.forEach(acc => {
-            summaryMessage += `- \`${acc}\`\n`;
+            summaryMessage += `- \`${escapeMarkdown(acc)}\`\n`;
         });
     }
     

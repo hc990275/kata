@@ -9,6 +9,8 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
@@ -38,6 +40,15 @@ jobs:
         TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
       # 使用 xvfb-run 模拟有头环境运行
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+    - name: Commit Renew Dates
+      if: always()
+      run: |
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add renew_dates.json || true
+        git diff --quiet && git diff --staged --quiet || git commit -m "chore: update renew dates [skip ci]"
+        git push || true
 
     - name: Upload Screenshots
       if: always()
