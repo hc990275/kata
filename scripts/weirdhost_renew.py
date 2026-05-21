@@ -57,7 +57,6 @@ RENEWAL_BUTTON_SELECTORS = [
 ]
 
 GLOBAL_COOKIES_LIST = []
-GLOBAL_COOKIES_PATH = None
 
 # ============================================================
 #  工具函数
@@ -932,8 +931,22 @@ def check_renewal_button_enabled(sb):
 def is_logged_in(sb):
     try:
         url = sb.get_current_url()
+        # 1. 显式未登录状态
         if "/login" in url or "/auth" in url:
             return False
+        
+        page_source = sb.get_page_source()
+        
+        # 页面中如果存在“로그인”(登录)或“Login”，且不存在“로그아웃”(登出)或“Logout”，则判断为未登录
+        if ("로그인" in page_source or "Login" in page_source) and \
+           not ("로그아웃" in page_source or "Logout" in page_source or "logout" in page_source or "/logout" in page_source):
+            return False
+
+        # 2. 显式登录状态 (包含登出按钮或登出链接)
+        if "로그아웃" in page_source or "Logout" in page_source or "logout" in page_source or "/logout" in page_source:
+            return True
+
+        # 3. 其它原版状态检测
         if get_expiry_from_page(sb) != "Unknown":
             return True
         if find_renewal_button(sb):
@@ -1182,18 +1195,92 @@ def process_single_account(sb, account, account_index):
 
     # Step 2: 注入 Cookie 并登录
     print(f"[INFO] [步骤2] 注入 Cookie 并登录...")
-    sb.add_cookie({"name": cookie_name, "value": cookie_value, "domain": DOMAIN, "path": "/"})
+    
+    current_url_before = "Unknown"
+    cookies_before = []
+    try:
+        current_url_before = sb.get_current_url()
+        cookies_before = sb.get_cookies()
+    except Exception as e:
+        print(f"[WARN]   获取注入前浏览器状态异常: {e}")
+        
+    print(f"[DEBUG]  注入前页面 URL: {current_url_before}")
+    print(f"[DEBUG]  注入前已有 Cookies 数量: {len(cookies_before)}")
+    
+    # 尝试多种 Cookie 格式写入以增强兼容性
+    cookie_success = False
+    try:
+        # 1. 尝试使用原本带指定 domain 的 Cookie
+        sb.add_cookie({"name": cookie_name, "value": cookie_value, "domain": DOMAIN, "path": "/", "secure": True})
+        # 2. 尝试使用不带指定 domain 的 Cookie（由浏览器自动匹配当前域）
+        sb.add_cookie({"name": cookie_name, "value": cookie_value, "path": "/", "secure": True})
+        
+        # 校验是否成功写入
+        cookies_after_add = sb.get_cookies()
+        written_cookie = next((c for c in cookies_after_add if c.get("name") == cookie_name), None)
+        if written_cookie:
+            print(f"[INFO]   Cookie '{cookie_name}' 成功写入浏览器！(值长度: {len(written_cookie.get('value', ''))})")
+            cookie_success = True
+        else:
+            print(f"[WARN]   Selenium add_cookie 未能在浏览器中找到写入值，尝试使用 JS 注入备用方案...")
+            # 备用方案：使用 JS 写入
+            sb.execute_script(f"document.cookie = '{cookie_name}={cookie_value}; path=/; secure; domain={DOMAIN}';")
+            sb.execute_script(f"document.cookie = '{cookie_name}={cookie_value}; path=/; secure';")
+            
+            cookies_js_check = sb.get_cookies()
+            written_js = next((c for c in cookies_js_check if c.get("name") == cookie_name), None)
+            if written_js:
+                print(f"[INFO]   JS 备用注入成功！")
+                cookie_success = True
+            else:
+                print(f"[ERROR]  Cookie 注入完全失败！未能在浏览器 Cookie 列表中找到 '{cookie_name}'")
+    except Exception as e:
+        print(f"[ERROR]  注入 Cookie 时抛出异常: {e}")
+        
+    # 页面跳转/加载
+    print(f"[INFO]   正在访问或刷新目标站点以应用登录态...")
     sb.uc_open_with_reconnect(f"https://{DOMAIN}/", reconnect_time=5)
     time.sleep(3)
 
+    # 检查跳转后 Cookie 是否依然存在
+    try:
+        current_url_after = sb.get_current_url()
+        cookies_after_load = sb.get_cookies()
+        target_cookie_after = next((c for c in cookies_after_load if c.get("name") == cookie_name), None)
+        print(f"[DEBUG]  跳转后当前 URL: {current_url_after}")
+        if target_cookie_after:
+            print(f"[DEBUG]  跳转后 Cookie '{cookie_name}' 依然存在 (未被清除)")
+        else:
+            print(f"[WARN]   ⚠️ 跳转后 Cookie '{cookie_name}' 消失了！可能被服务器通过 Set-Cookie 显式清除（多为 Cookie 本身过期）或浏览器拒绝携带。")
+    except Exception as e:
+        print(f"[WARN]   检查跳转后 Cookie 状态异常: {e}")
+
     if not is_logged_in(sb):
-        print("[WARN]   未检测到登录状态，尝试刷新...")
+        print("[WARN]   未检测到登录状态，尝试访问 /server/ 刷新...")
         sb.uc_open_with_reconnect(f"https://{DOMAIN}/server/", reconnect_time=5)
         time.sleep(3)
+        
+        # 再次确认 Cookie 是否存在
+        try:
+            cookies_final = sb.get_cookies()
+            final_cookie = next((c for c in cookies_final if c.get("name") == cookie_name), None)
+            if not final_cookie:
+                print(f"[WARN]   ⚠️ 访问 /server/ 后 Cookie '{cookie_name}' 消失了！")
+        except:
+            pass
 
     if not is_logged_in(sb):
         ss_path = f"acc{account_index+1}_login_fail.png"
         sb.save_screenshot(ss_path)
+        
+        # 收集页面 info 输出以防误判
+        try:
+            page_text = sb.get_page_source()
+            print(f"[DEBUG]  登录失败页特征：URL={sb.get_current_url()} | Title={sb.get_title()}")
+            print(f"[DEBUG]  登录失败页源码长度: {len(page_text)} 字节")
+        except:
+            pass
+            
         result["status"] = "cookie_invalid"
         result["message"] = "Cookie 失效或登录失败（Turnstile 通过后仍无法登录）"
         return result
