@@ -1056,7 +1056,11 @@ def process_single_server(sb, server_info, cookie_name, cookie_value, cookie_str
         time.sleep(3)
 
         if not is_logged_in(sb):
-            sb.add_cookie({"name": cookie_name, "value": cookie_value, "domain": DOMAIN, "path": "/"})
+            sb.add_cookie({
+                "name": cookie_name, "value": cookie_value, "domain": DOMAIN, "path": "/",
+                "secure": True, "httpOnly": True, "sameSite": "Lax",
+                "expiry": int(time.time()) + 3600 * 24 * 365,
+            })
             sb.uc_open_with_reconnect(server_url, reconnect_time=5)
             time.sleep(3)
 
@@ -1208,13 +1212,21 @@ def process_single_account(sb, account, account_index):
     print(f"[DEBUG]  注入前页面 URL: {current_url_before}")
     print(f"[DEBUG]  注入前已有 Cookies 数量: {len(cookies_before)}")
     
-    # 尝试多种 Cookie 格式写入以增强兼容性
+    # 注入 Cookie（完整属性，对标参考脚本的 Playwright 写法）
+    cookie_expiry = int(time.time()) + 3600 * 24 * 365  # 1年后过期
+    full_cookie = {
+        "name": cookie_name,
+        "value": cookie_value,
+        "domain": DOMAIN,
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+        "expiry": cookie_expiry,
+    }
     cookie_success = False
     try:
-        # 1. 尝试使用原本带指定 domain 的 Cookie
-        sb.add_cookie({"name": cookie_name, "value": cookie_value, "domain": DOMAIN, "path": "/", "secure": True})
-        # 2. 尝试使用不带指定 domain 的 Cookie（由浏览器自动匹配当前域）
-        sb.add_cookie({"name": cookie_name, "value": cookie_value, "path": "/", "secure": True})
+        sb.add_cookie(full_cookie)
         
         # 校验是否成功写入
         cookies_after_add = sb.get_cookies()
@@ -1223,11 +1235,12 @@ def process_single_account(sb, account, account_index):
             print(f"[INFO]   Cookie '{cookie_name}' 成功写入浏览器！(值长度: {len(written_cookie.get('value', ''))})")
             cookie_success = True
         else:
-            print(f"[WARN]   Selenium add_cookie 未能在浏览器中找到写入值，尝试使用 JS 注入备用方案...")
-            # 备用方案：使用 JS 写入
-            sb.execute_script(f"document.cookie = '{cookie_name}={cookie_value}; path=/; secure; domain={DOMAIN}';")
-            sb.execute_script(f"document.cookie = '{cookie_name}={cookie_value}; path=/; secure';")
-            
+            print(f"[WARN]   add_cookie 未能写入，尝试 JS 备用注入...")
+            # JS 备用：需显式设置 max-age 防止被当成 session cookie
+            max_age = 3600 * 24 * 365
+            sb.execute_script(
+                f"document.cookie = '{cookie_name}={cookie_value}; path=/; max-age={max_age}; secure; samesite=Lax; domain={DOMAIN}';"
+            )
             cookies_js_check = sb.get_cookies()
             written_js = next((c for c in cookies_js_check if c.get("name") == cookie_name), None)
             if written_js:
