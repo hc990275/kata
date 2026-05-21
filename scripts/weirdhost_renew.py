@@ -57,6 +57,7 @@ RENEWAL_BUTTON_SELECTORS = [
 ]
 
 GLOBAL_COOKIES_LIST = []
+GLOBAL_COOKIES_PATH = None
 
 # ============================================================
 #  工具函数
