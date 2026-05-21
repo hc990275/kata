@@ -1421,6 +1421,13 @@ def add_server_time():
             print("\n[INFO] 浏览器已启动")
 
             for i, account in enumerate(accounts):
+                # 切换账号前清除所有 Cookie，防止上一个账号的 Session 污染
+                try:
+                    sb.delete_all_cookies()
+                    sb.uc_open_with_reconnect(f"https://{DOMAIN}/", reconnect_time=3)
+                except:
+                    pass
+
                 result = process_single_account(sb, account, i)
                 results.append(result)
 
