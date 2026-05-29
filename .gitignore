@@ -6,3 +6,5 @@ screenshots/
 .codex
 .env
 cookies.txt
+.login.json
+login.json
