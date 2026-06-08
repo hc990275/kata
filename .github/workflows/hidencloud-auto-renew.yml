@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 初始默认一个时间（例如：北京时间每天 08:30，即 UTC 当天 00:30）
-    - cron: '30 0 * * *'  # 每天随机 北京时间 08:30
+    - cron: '24 0 * * *'  # 每天随机 北京时间 08:24
 
 jobs:
   renew:
