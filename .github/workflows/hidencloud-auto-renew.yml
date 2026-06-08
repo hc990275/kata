@@ -334,7 +334,7 @@ jobs:
               next_run_days = 1
 
           bj_h = random.randint(8, 8)
-          bj_m = random.randint(0, 59)
+          bj_m = random.randint(30, 59)
 
           # 2. 计算对应的 UTC 时间
           bj_tz = timezone(timedelta(hours=8))
