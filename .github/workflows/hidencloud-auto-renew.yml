@@ -3,8 +3,8 @@ name: HidenCloud Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    # 初始默认一个时间（例如：北京时间每天 03:25，即 UTC 前一天 19:25）
-    - cron: '26 17 * * *'  # 每天随机 北京时间 01:26
+    # 初始默认一个时间（例如：北京时间每天 08:30，即 UTC 当天 00:30）
+    - cron: '30 0 * * *'  # 每天随机 北京时间 08:30
 
 jobs:
   renew:
@@ -328,9 +328,9 @@ jobs:
 
           YML_PATH = ".github/workflows/hidencloud-auto-renew.yml"
 
-          # 1. 随机生成明天北京时间的 时(1-7) 和 分(0-59)
-          # 注意：为了绝对安全不压线，时段设为 1 点到 7 点 59 分之间
-          bj_h = random.randint(1, 7)
+          # 1. 随机生成明天北京时间的 时(8-8) 和 分(0-59)
+          # 注意：为了绝对安全不压线，时段设为 8 点到 8 点 59 分之间
+          bj_h = random.randint(8, 8)
           bj_m = random.randint(0, 59)
 
           # 2. 计算对应的 UTC 时间
