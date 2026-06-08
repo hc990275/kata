@@ -1,0 +1,407 @@
+name: HidenCloud Auto Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 初始默认一个时间（例如：北京时间每天 03:25，即 UTC 前一天 19:25）
+    - cron: '26 17 * * *'  # 每天随机 北京时间 01:26
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # 必须使用具备 'workflow' 权限的 Personal Access Token 才能让修改后的 cron 生效
+          token: ${{ secrets.REPO_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            google-chrome-stable \
+            unzip \
+            xvfb \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            libatspi2.0-0 \
+            libxshmfence1 \
+            fonts-liberation \
+            libxrender1 \
+            libxtst6
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install DrissionPage requests pysocks
+
+      - name: Restore Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            hiden_browser_profile
+            hiden_cookies
+          key: hiden-profile-${{ github.run_id }}
+          restore-keys: |
+            hiden-profile-
+
+      - name: Setup Proxy
+        env:
+          PROXY_NODE: ${{ secrets.PROXY_NODE }}
+        run: |
+          if [ -z "$PROXY_NODE" ]; then
+            echo "[INFO] 未配置代理，直连模式"
+            exit 0
+          fi
+
+          # 将多行节点写入文件，过滤空行和注释行
+          echo "$PROXY_NODE" | grep -v '^\s*$' | grep -v '^\s*#' > proxy_nodes.txt
+          NODE_COUNT=$(wc -l < proxy_nodes.txt)
+          echo "[INFO] 共读取到 $NODE_COUNT 条节点"
+
+          if [ "$NODE_COUNT" -eq 0 ]; then
+            echo "[INFO] 节点列表为空，直连模式"
+            exit 0
+          fi
+
+          wget -q https://github.com/oyz6/action/releases/download/proxy/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip -d xray && chmod +x xray/xray
+
+          # ---------- Python 解析函数（接收单条 URL，输出 xray_config.json 或 use_external_socks.txt）----------
+          cat > parse_node.py << 'PYEOF'
+          import os, sys, json, base64
+          from urllib.parse import parse_qs, unquote
+
+          def mask(s):
+              return f"{s[:2]}***{s[-2:]}" if len(s) > 4 else "****"
+
+          url = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+          if not url:
+              print("[ERROR] URL 为空")
+              sys.exit(1)
+
+          if url.startswith("vless://"):
+              protocol = "vless"
+              content = url[8:]
+          elif url.startswith("vmess://"):
+              protocol = "vmess"
+              content = url[8:]
+          elif url.startswith("trojan://"):
+              protocol = "trojan"
+              content = url[9:]
+          elif url.startswith("ss://"):
+              protocol = "ss"
+              content = url[5:]
+          elif url.startswith("socks5://") or url.startswith("socks://"):
+              protocol = "socks5"
+              content = url.split("://")[1].split("#")[0]
+              server = content.split("@")[1].split(":")[0] if "@" in content else content.split(":")[0]
+              print(f"[INFO] SOCKS5 -> {mask(server)}")
+              with open("use_external_socks.txt", "w") as f:
+                  f.write(url.split("#")[0])
+              sys.exit(0)
+          else:
+              print(f"[ERROR] 不支持的协议: {url.split('://')[0]}")
+              sys.exit(1)
+
+          if "#" in content:
+              content = content.rsplit("#", 1)[0]
+
+          config = {
+              "log": {"loglevel": "warning"},
+              "inbounds": [
+                  {"port": 1080, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}},
+                  {"port": 1081, "listen": "127.0.0.1", "protocol": "http"}
+              ],
+              "outbounds": []
+          }
+
+          if protocol == "vless":
+              uuid, rest = content.split("@", 1)
+              host_port, params_str = rest.split("?", 1) if "?" in rest else (rest, "")
+              address, port = host_port.rsplit(":", 1) if ":" in host_port else (host_port, "443")
+              params = parse_qs(params_str)
+              security = params.get("security", ["none"])[0]
+              network  = params.get("type",     ["tcp"])[0]
+              sni      = params.get("sni",      [address])[0]
+              fp       = params.get("fp",       ["chrome"])[0]
+              flow     = params.get("flow",     [""])[0]
+              pbk      = params.get("pbk",      [""])[0]
+              host     = params.get("host",     [sni])[0]
+              path     = unquote(params.get("path", ["/"])[0])
+              print(f"[INFO] VLESS -> {mask(address)}:{port} (security: {security}, network: {network})")
+              outbound = {
+                  "protocol": "vless",
+                  "settings": {"vnext": [{"address": address, "port": int(port),
+                      "users": [{"id": uuid, "encryption": "none"}]}]},
+                  "streamSettings": {"network": network, "security": security}
+              }
+              if flow:
+                  outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
+              if security == "reality":
+                  outbound["streamSettings"]["realitySettings"] = {"serverName": sni, "fingerprint": fp, "publicKey": pbk}
+              elif security == "tls":
+                  outbound["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": fp, "allowInsecure": False}
+              if network == "ws":
+                  outbound["streamSettings"]["wsSettings"] = {"path": path, "headers": {"Host": host}}
+              elif network == "grpc":
+                  outbound["streamSettings"]["grpcSettings"] = {"serviceName": params.get("serviceName", [""])[0]}
+              config["outbounds"].append(outbound)
+
+          elif protocol == "vmess":
+              try:
+                  padding = 4 - len(content) % 4
+                  if padding != 4: content += "=" * padding
+                  vm = json.loads(base64.b64decode(content).decode("utf-8"))
+              except Exception as e:
+                  print(f"[ERROR] VMess 解析失败: {e}"); sys.exit(1)
+              address = vm.get("add", ""); port = int(vm.get("port", 443))
+              uuid = vm.get("id", ""); aid = int(vm.get("aid", 0))
+              network = vm.get("net", "tcp"); tls = vm.get("tls", "")
+              sni = vm.get("sni", "") or vm.get("host", address)
+              host = vm.get("host", address); path = vm.get("path", "/"); fp = vm.get("fp", "chrome")
+              print(f"[INFO] VMess -> {mask(address)}:{port} (network: {network}, tls: {tls})")
+              outbound = {
+                  "protocol": "vmess",
+                  "settings": {"vnext": [{"address": address, "port": port,
+                      "users": [{"id": uuid, "alterId": aid, "security": "auto"}]}]},
+                  "streamSettings": {"network": network, "security": "tls" if tls == "tls" else "none"}
+              }
+              if tls == "tls":
+                  outbound["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": fp, "allowInsecure": False}
+              if network == "ws":
+                  outbound["streamSettings"]["wsSettings"] = {"path": path, "headers": {"Host": host}}
+              config["outbounds"].append(outbound)
+
+          elif protocol == "trojan":
+              password, rest = content.split("@", 1)
+              host_port, params_str = rest.split("?", 1) if "?" in rest else (rest, "")
+              address, port = host_port.rsplit(":", 1) if ":" in host_port else (host_port, "443")
+              params = parse_qs(params_str)
+              sni     = params.get("sni",  [address])[0]
+              network = params.get("type", ["tcp"])[0]
+              host    = params.get("host", [sni])[0]
+              path    = unquote(params.get("path", ["/"])[0])
+              fp      = params.get("fp",   ["chrome"])[0]
+              print(f"[INFO] Trojan -> {mask(address)}:{port} (network: {network})")
+              outbound = {
+                  "protocol": "trojan",
+                  "settings": {"servers": [{"address": address, "port": int(port), "password": password}]},
+                  "streamSettings": {"network": network, "security": "tls",
+                      "tlsSettings": {"serverName": sni, "fingerprint": fp, "allowInsecure": False}}
+              }
+              if network == "ws":
+                  outbound["streamSettings"]["wsSettings"] = {"path": path, "headers": {"Host": host}}
+              config["outbounds"].append(outbound)
+
+          elif protocol == "ss":
+              try:
+                  if "@" in content:
+                      encoded, server_part = content.split("@", 1)
+                      decoded = base64.b64decode(encoded + "==").decode("utf-8")
+                      method, password = decoded.split(":", 1)
+                      address, port = server_part.split(":", 1)
+                  else:
+                      decoded = base64.b64decode(content + "==").decode("utf-8")
+                      if "@" in decoded:
+                          user_part, server_part = decoded.split("@", 1)
+                          method, password = user_part.split(":", 1)
+                          address, port = server_part.split(":", 1)
+                      else:
+                          raise ValueError("无法解析")
+              except Exception as e:
+                  print(f"[ERROR] Shadowsocks 解析失败: {e}"); sys.exit(1)
+              print(f"[INFO] Shadowsocks -> {mask(address)}:{port}")
+              outbound = {
+                  "protocol": "shadowsocks",
+                  "settings": {"servers": [{"address": address, "port": int(port),
+                      "method": method, "password": password}]}
+              }
+              config["outbounds"].append(outbound)
+
+          with open("xray_config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          print("[INFO] ✅ 代理配置已生成")
+          PYEOF
+
+          # ---------- 逐节点尝试 ----------
+          NODE_INDEX=0
+          PROXY_OK=false
+
+          while IFS= read -r NODE_URL; do
+            NODE_INDEX=$((NODE_INDEX + 1))
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "[INFO] 🔄 尝试节点 $NODE_INDEX / $NODE_COUNT"
+
+            # 清理上一轮残留
+            rm -f xray_config.json use_external_socks.txt xray.log
+            pkill -f "xray/xray" 2>/dev/null || true
+            sleep 1
+
+            # 解析节点
+            if ! python3 parse_node.py "$NODE_URL"; then
+              echo "[WARN] ⚠️ 节点 $NODE_INDEX 解析失败，跳过"
+              continue
+            fi
+
+            # SOCKS5 外部代理
+            if [ -f "use_external_socks.txt" ]; then
+              EXTERNAL_SOCKS=$(cat use_external_socks.txt)
+              echo "[INFO] 测试外部 SOCKS5 代理..."
+              if curl -x "$EXTERNAL_SOCKS" -s --max-time 15 https://api.ipify.org > /dev/null 2>&1; then
+                echo "[INFO] ✅ 节点 $NODE_INDEX 连接成功（外部 SOCKS5）"
+                echo "PROXY_SERVER=$EXTERNAL_SOCKS" >> $GITHUB_ENV
+                PROXY_OK=true
+                break
+              else
+                echo "[WARN] ⚠️ 节点 $NODE_INDEX 外部 SOCKS5 连接失败，尝试下一个"
+                continue
+              fi
+            fi
+
+            # Xray 内部代理
+            ./xray/xray run -c xray_config.json > xray.log 2>&1 &
+            sleep 5
+
+            echo "[INFO] 测试代理连接..."
+            CONNECTED=false
+            for i in 1 2 3; do
+              if curl -x socks5://127.0.0.1:1080 -s --max-time 15 https://api.ipify.org > /dev/null 2>&1; then
+                CONNECTED=true
+                break
+              fi
+              echo "[WARN] 连接测试 $i/3..."
+              sleep 3
+            done
+
+            if $CONNECTED; then
+              echo "[INFO] ✅ 节点 $NODE_INDEX 连接成功"
+              echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+              PROXY_OK=true
+              break
+            else
+              echo "[WARN] ⚠️ 节点 $NODE_INDEX 连接失败，尝试下一个"
+              pkill -f "xray/xray" 2>/dev/null || true
+              sleep 2
+            fi
+
+          done < proxy_nodes.txt
+
+          echo ""
+          if $PROXY_OK; then
+            echo "[INFO] 🎉 代理已就绪，继续执行任务"
+          else
+            echo "[WARN] ❌ 所有 $NODE_COUNT 条节点均连接失败，将以直连模式继续"
+            pkill -f "xray/xray" 2>/dev/null || true
+          fi
+
+      - name: Run Renewal Script
+        env:
+          ACCOUNTS:     ${{ secrets.ACCOUNTS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
+          PROXY:        ${{ env.PROXY_SERVER }}
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
+
+      - name: Schedule next daily random run
+        if: always()
+        run: |
+          python3 << 'PYEOF'
+          import random
+          import re
+          import os
+          from datetime import datetime, timedelta, timezone
+
+          YML_PATH = ".github/workflows/hidencloud-auto-renew.yml"
+
+          # 1. 随机生成明天北京时间的 时(1-7) 和 分(0-59)
+          # 注意：为了绝对安全不压线，时段设为 1 点到 7 点 59 分之间
+          bj_h = random.randint(1, 7)
+          bj_m = random.randint(0, 59)
+
+          # 2. 计算对应的 UTC 时间
+          # 假设明天的北京时间
+          bj_tz = timezone(timedelta(hours=8))
+          now_bj = datetime.now(bj_tz)
+          tomorrow_bj = now_bj + timedelta(days=1)
+          target_bj = tomorrow_bj.replace(hour=bj_h, minute=bj_m, second=0, microsecond=0)
+          
+          # 转换成 UTC
+          target_utc = target_bj.astimezone(timezone.utc)
+          
+          cron_m = target_utc.minute
+          cron_h = target_utc.hour
+
+          # 3. 生成新的 Cron 表达式 (每天运行格式: m h * * *)
+          cron_value = f"{cron_m} {cron_h} * * *"
+          cron_comment = f"  # 每天随机 北京时间 {bj_h:02d}:{bj_m:02d}"
+          print(f"🎲 针对应生成的明日排期：- cron: '{cron_value}'{cron_comment}")
+
+          # 4. 替换 YML 文件中的 cron 行（直接逐行替换，不依赖缩进正则）
+          if os.path.exists(YML_PATH):
+              with open(YML_PATH, "r", encoding="utf-8") as f:
+                  lines = f.readlines()
+
+              new_lines = []
+              replaced = False
+              for line in lines:
+                  if re.search(r"- cron:", line) and not replaced:
+                      # 保留原行的缩进前缀
+                      indent = re.match(r"(\s*)", line).group(1)
+                      new_lines.append(f"{indent}- cron: '{cron_value}'{cron_comment}\n")
+                      replaced = True
+                  else:
+                      new_lines.append(line)
+
+              with open(YML_PATH, "w", encoding="utf-8") as f:
+                  f.writelines(new_lines)
+
+              if replaced:
+                  print("✅ YML 中的下一次 Cron 排期已成功改写")
+              else:
+                  print("❌ 未找到 cron 行，替换失败")
+          else:
+              print(f"❌ 未找到 YML 文件: {YML_PATH}")
+          PYEOF
+
+          # 5. Git 提交并推送（强制写入，不跳过）
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/hidencloud-auto-renew.yml
+          git commit --allow-empty -m "chore: update daily random schedule [skip ci]"
+          git push
+          echo "🚀 成功将明日随机时间推送到仓库"
+          
+
+      - name: Save Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            hiden_browser_profile
+            hiden_cookies
+          key: hiden-profile-${{ github.run_id }}
+
+      - name: Upload Debug Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-and-screenshots
+          path: |
+            *.png
+            xray.log
+          retention-days: 3
