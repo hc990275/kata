@@ -40,7 +40,7 @@
 | Secret 变量名 | 必填 | 格式与说明 |
 | :--- | :---: | :--- |
 | **`ACCOUNTS`** | ✅ | 你的 HidenCloud 账号密码。格式：`email---password`。多个账号可以用换行符隔开。 |
-| **`PROXY_NODE`** | ✅ | 你提供的节点 URI（例如：`vless://...` 或 `vmess://...`）。支持多行多节点轮询。 |
+| **`PROXY_NODE`** | ❌ | （可选）你提供的节点 URI（例如：`vless://...` 或 `vmess://...`）。如果不填则不走代理直连。支持多行多节点轮询。 |
 | **`TG_BOT_TOKEN`** | ✅ | Telegram 机器人的 Token（由 `@BotFather` 获取）。 |
 | **`TG_CHAT_ID`** | ✅ | 接收消息的用户 ID 或群组 ID。 |
 | **`TG_THREAD_ID`** | ❌ | （可选）如果你使用的是开启了话题讨论功能的群组，可填入具体的话题 ID 以防止刷屏。 |
