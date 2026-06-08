@@ -991,10 +991,15 @@ def main():
         with open(env_file, 'a', encoding='utf-8') as f:
             f.write(f"NEXT_RUN_DAYS={next_run_days}\n")
 
+    from datetime import timedelta, timezone
+    bj_tz = timezone(timedelta(hours=8))
+    next_date = datetime.now(bj_tz) + timedelta(days=next_run_days)
+    date_str = f"{next_date.month}月{next_date.day}日"
+
     tg_msg = (
         f"🔔 <b>HidenCloud 续期总报告</b>\n"
         f"📊 ✅ 成功 {total_ok} | ⏰ 跳过 {total_skip} | ❌ 失败 {total_fail}\n"
-        f"⏳ <b>预计休眠天数: {next_run_days} 天</b>\n\n"
+        f"⏳ <b>下次进行续期为 {date_str}</b>\n\n"
         + '\n\n'.join(account_summaries)
     )
     send_tg(tg_token, tg_chat_id, tg_msg)
