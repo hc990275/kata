@@ -952,11 +952,7 @@ def main():
             else:
                 icon = "❌"
             inv  = f" | 发票: <code>{r['invoice_id']}</code>" if r.get('invoice_id') else ""
-            days_info = ""
-            if r.get('skipped') and r.get('days_left') is not None:
-                thr = r.get('threshold')
-                days_info = f"（剩余 {r['days_left']} 天，需 ≤{thr} 天）" if thr else f"（剩余 {r['days_left']} 天）"
-            lines.append(f"  {icon} 服务 #{r['service_id']}: {r['message']}{inv}{days_info}")
+            lines.append(f"  {icon} 服务 #{r['service_id']}: {r['message']}{inv}")
         account_summaries.append('\n'.join(lines))
 
     total_ok   = sum(1 for r in all_results if r.get('success'))
