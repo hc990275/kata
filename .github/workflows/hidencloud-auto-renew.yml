@@ -317,7 +317,7 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
 
-      - name: Schedule next daily random run
+      - name: Schedule next dynamic random run
         if: always()
         run: |
           python3 << 'PYEOF'
@@ -328,28 +328,32 @@ jobs:
 
           YML_PATH = ".github/workflows/hidencloud-auto-renew.yml"
 
-          # 1. 随机生成明天北京时间的 时(8-8) 和 分(0-59)
-          # 注意：为了绝对安全不压线，时段设为 8 点到 8 点 59 分之间
+          # 1. 读取环境中的休眠天数，默认1天
+          next_run_days = int(os.getenv('NEXT_RUN_DAYS', '1'))
+          if next_run_days <= 0:
+              next_run_days = 1
+
           bj_h = random.randint(8, 8)
           bj_m = random.randint(0, 59)
 
           # 2. 计算对应的 UTC 时间
-          # 假设明天的北京时间
           bj_tz = timezone(timedelta(hours=8))
           now_bj = datetime.now(bj_tz)
-          tomorrow_bj = now_bj + timedelta(days=1)
-          target_bj = tomorrow_bj.replace(hour=bj_h, minute=bj_m, second=0, microsecond=0)
+          target_bj = now_bj + timedelta(days=next_run_days)
+          target_bj = target_bj.replace(hour=bj_h, minute=bj_m, second=0, microsecond=0)
           
           # 转换成 UTC
           target_utc = target_bj.astimezone(timezone.utc)
           
           cron_m = target_utc.minute
           cron_h = target_utc.hour
+          cron_d = target_utc.day
+          cron_mo = target_utc.month
 
-          # 3. 生成新的 Cron 表达式 (每天运行格式: m h * * *)
-          cron_value = f"{cron_m} {cron_h} * * *"
-          cron_comment = f"  # 每天随机 北京时间 {bj_h:02d}:{bj_m:02d}"
-          print(f"🎲 针对应生成的明日排期：- cron: '{cron_value}'{cron_comment}")
+          # 3. 生成新的 Cron 表达式
+          cron_value = f"{cron_m} {cron_h} {cron_d} {cron_mo} *"
+          cron_comment = f"  # 下次运行: 北京时间 {target_bj.strftime('%m-%d %H:%M')} (休眠 {next_run_days} 天)"
+          print(f"🎲 针对应生成的排期：- cron: '{cron_value}'{cron_comment}")
 
           # 4. 替换 YML 文件中的 cron 行（直接逐行替换，不依赖缩进正则）
           if os.path.exists(YML_PATH):

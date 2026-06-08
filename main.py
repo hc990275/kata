@@ -963,9 +963,38 @@ def main():
     total_skip = sum(1 for r in all_results if r.get('skipped'))
     total_fail = len(all_results) - total_ok - total_skip
 
+    # 计算下次运行天数
+    wait_days_list = []
+    has_errors = (total_fail > 0)
+    
+    for r in all_results:
+        if r.get('success'):
+            wait_days_list.append(6)
+        elif r.get('skipped'):
+            days = r.get('days_left')
+            thr = r.get('threshold')
+            if days is not None and thr is not None:
+                w = days - thr
+                wait_days_list.append(w if w >= 1 else 1)
+            else:
+                has_errors = True
+                
+    if has_errors or not wait_days_list:
+        next_run_days = 1
+    else:
+        next_run_days = min(wait_days_list)
+        if next_run_days < 1:
+            next_run_days = 1
+            
+    env_file = os.getenv('GITHUB_ENV')
+    if env_file:
+        with open(env_file, 'a', encoding='utf-8') as f:
+            f.write(f"NEXT_RUN_DAYS={next_run_days}\n")
+
     tg_msg = (
         f"🔔 <b>HidenCloud 续期总报告</b>\n"
-        f"📊 ✅ 成功 {total_ok} | ⏰ 跳过 {total_skip} | ❌ 失败 {total_fail}\n\n"
+        f"📊 ✅ 成功 {total_ok} | ⏰ 跳过 {total_skip} | ❌ 失败 {total_fail}\n"
+        f"⏳ <b>预计休眠天数: {next_run_days} 天</b>\n\n"
         + '\n\n'.join(account_summaries)
     )
     send_tg(tg_token, tg_chat_id, tg_msg)
