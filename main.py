@@ -742,8 +742,13 @@ class HidenCloudRenewer:
 
             # 尝试点击 Apply Credit / Pay（免费服务通常自动完成，有按钮就点）
             for sel in [
-                'xpath://button[contains(text(),"Apply Credit")]',
+                'xpath://button[normalize-space()="Apply Credit"]',
+                'xpath://button[normalize-space()="Pay"]',
+                'xpath://a[normalize-space()="Pay"]',
+                'text=Apply Credit',
+                'text=Pay',
                 'xpath://button[contains(text(),"Pay Now")]',
+                'xpath://button[contains(text(),"Apply Credit")]',
                 'xpath://button[contains(text(),"Pay")]',
                 'xpath://a[contains(text(),"Pay")]',
             ]:
