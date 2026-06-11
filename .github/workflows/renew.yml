@@ -48,7 +48,11 @@ jobs:
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
         git add renew_dates.json || true
         git diff --cached --quiet renew_dates.json || git commit -m "chore: update renew dates [skip ci]"
-        git push || true
+        for i in {1..3}; do
+          git pull --rebase && git push && break
+          echo "⚠️ Push failed, retrying in 5 seconds ($i/3)..."
+          sleep 5
+        done
 
     - name: Upload Screenshots
       if: always()
