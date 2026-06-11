@@ -576,9 +576,13 @@ class HidenCloudRenewer:
         for sel in [
             'css:button[onclick*="showRenewAlert"]',
             'xpath://button[.//i[contains(@class,"bx-recycle")]]',
+            'xpath://a[.//i[contains(@class,"bx-recycle")]]',
             'xpath://button[normalize-space()="Renew"]',
+            'xpath://a[normalize-space()="Renew"]',
             'xpath://button[contains(text(),"Renew")]',
+            'xpath://a[contains(text(),"Renew")]',
             'css:[data-action*="renew"]',
+            'text=Renew',
         ]:
             try:
                 el = page.ele(sel, timeout=3)
@@ -671,6 +675,9 @@ class HidenCloudRenewer:
             'css:div[id^="renewService-"]',
             'css:div[role="dialog"]',
             'css:.modal:not([style*="display: none"])',
+            'xpath://div[contains(@class, "modal")]',
+            'xpath://div[contains(@class, "fixed")]',
+            'text=Renew Plan',
         ]:
             try:
                 el = page.ele(sel, timeout=8)
@@ -696,7 +703,12 @@ class HidenCloudRenewer:
             invoice_btn = None
             for sel in [
                 'xpath://button[contains(text(),"Create Invoice")]',
+                'xpath://a[contains(text(),"Create Invoice")]',
+                'xpath://button[contains(., "Create Invoice")]',
+                'xpath://a[contains(., "Create Invoice")]',
                 'xpath://button[contains(text(),"Confirm")]',
+                'xpath://a[contains(text(),"Confirm")]',
+                'text=Create Invoice',
                 f'xpath://div[@id="renewService-{service_id}"]//button[@type="submit"]',
                 'css:div[id^="renewService-"] button[type="submit"]',
                 'xpath://div[@role="dialog"]//button[@type="submit"]',
