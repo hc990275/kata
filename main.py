@@ -982,7 +982,7 @@ def main():
     
     for r in all_results:
         if r.get('success'):
-            wait_days_list.append(6)
+            wait_days_list.append(7)
         elif r.get('skipped'):
             days = r.get('days_left')
             thr = r.get('threshold')
