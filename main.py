@@ -563,6 +563,7 @@ class HidenCloudRenewer:
         # ── 续期前到期时间 ───────────────────────
         due_before_raw, due_before_std = _get_due_date(page)
         result['due_before'] = due_before_raw
+        result['due_std'] = due_before_std
         log(f"[{service_id}] 📅 续期前到期: {due_before_raw}")
 
         # 获取 CSRF token
@@ -984,13 +985,26 @@ def main():
         if r.get('success'):
             wait_days_list.append(7)
         elif r.get('skipped'):
-            days = r.get('days_left')
-            thr = r.get('threshold')
-            if days is not None and thr is not None:
-                w = days - thr
-                wait_days_list.append(w if w >= 1 else 1)
+            due_std = r.get('due_std')
+            if due_std:
+                from datetime import datetime, timedelta, timezone
+                bj_tz = timezone(timedelta(hours=8))
+                try:
+                    due_dt = datetime.strptime(due_std, "%Y-%m-%d").replace(tzinfo=bj_tz)
+                    now_dt = datetime.now(bj_tz)
+                    target_dt = due_dt - timedelta(days=1)
+                    w = (target_dt.date() - now_dt.date()).days
+                    wait_days_list.append(w if w >= 1 else 1)
+                except Exception:
+                    wait_days_list.append(1)
             else:
-                has_errors = True
+                days = r.get('days_left')
+                thr = r.get('threshold')
+                if days is not None and thr is not None:
+                    w = days - thr
+                    wait_days_list.append(w if w >= 1 else 1)
+                else:
+                    has_errors = True
                 
     if has_errors or not wait_days_list:
         next_run_days = 1
